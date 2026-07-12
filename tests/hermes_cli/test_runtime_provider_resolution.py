@@ -117,6 +117,39 @@ def test_codex_app_server_runtime_applies_when_pool_empty(monkeypatch):
     assert resolved["api_mode"] == "codex_app_server"
 
 
+def test_codex_app_server_runtime_bypasses_exhausted_hermes_pool(monkeypatch):
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "openai_runtime": "codex_app_server",
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("app-server must resolve before provider auth")
+        ),
+    )
+    monkeypatch.setattr(
+        rp,
+        "load_pool",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("app-server must not load the Hermes credential pool")
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="openai-codex")
+
+    assert resolved["api_mode"] == "codex_app_server"
+    assert resolved["source"] == "codex-app-server"
+    assert resolved["api_key"] == "codex-app-server"
+    assert resolved["credential_pool"] is None
+
+
 def test_codex_app_server_runtime_applies_to_explicit_codex(monkeypatch):
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openai-codex")
     monkeypatch.setattr(
@@ -136,6 +169,8 @@ def test_codex_app_server_runtime_applies_to_explicit_codex(monkeypatch):
 
     assert resolved["api_mode"] == "codex_app_server"
     assert resolved["source"] == "explicit"
+    assert resolved["api_key"] == "explicit-token"
+    assert resolved["base_url"] == "https://chatgpt.com/backend-api/codex"
 
 
 class TestCustomProviderPoolLoopbackNoKeyExemption:

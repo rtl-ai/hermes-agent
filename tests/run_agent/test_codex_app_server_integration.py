@@ -509,75 +509,32 @@ class TestRunConversationCodexPath:
         assert routing.auto_approve_apply_patch is True
 
 
-class TestReviewForkApiModeDowngrade:
-    """When the parent agent runs on codex_app_server, the background
-    review fork must downgrade to codex_responses — otherwise the fork
-    can't dispatch agent-loop tools (memory, skill_manage) which is the
-    whole point of the review."""
+class TestReviewForkAppServerSafety:
+    """App-server review forks are skipped unless routed to another runtime."""
 
-    def test_codex_app_server_parent_downgrades_review_fork(self):
-        """Live test against the real _spawn_background_review code path:
-        verify the review_agent gets api_mode=codex_responses when the
-        parent is codex_app_server."""
-        from unittest.mock import MagicMock, patch as _patch
+    def test_codex_app_server_parent_does_not_construct_review_agent(self):
+        from unittest.mock import patch as _patch
+
+        from agent.background_review import _run_review_in_thread
+
         agent = _make_codex_agent()
-        # Pretend memory + skills are configured so the review fork
-        # reaches the AIAgent constructor.
-        agent._memory_store = MagicMock()
-        agent._memory_enabled = True
-        agent._user_profile_enabled = True
-        # Mock _current_main_runtime to return the parent's codex_app_server
-        # state so we can confirm the helper detects + downgrades it.
         agent._current_main_runtime = lambda: {
             "api_mode": "codex_app_server",
             "base_url": "https://chatgpt.com/backend-api/codex",
-            "api_key": "stub-token",
+            "api_key": "codex-app-server",
         }
-        # Capture what AIAgent gets constructed with inside the helper.
-        captured = {}
+        cfg = {"auxiliary": {"background_review": {"provider": "auto", "model": ""}}}
 
-        def _capture_init(self, **kwargs):
-            captured.update(kwargs)
-            # Set bare attributes the rest of the spawn function reads
-            # so it can finish without exploding.
-            self.api_mode = kwargs.get("api_mode")
-            self.provider = kwargs.get("provider")
-            self.model = kwargs.get("model")
-            self._memory_write_origin = None
-            self._memory_write_context = None
-            self._memory_store = None
-            self._memory_enabled = False
-            self._user_profile_enabled = False
-            self._memory_nudge_interval = 0
-            self._skill_nudge_interval = 0
-            self.suppress_status_output = False
-            self._session_messages = []
-
-            def _no_op_run_conv(*a, **kw):
-                return {"final_response": "", "messages": []}
-            self.run_conversation = _no_op_run_conv
-
-            def _no_op_close(*a, **kw):
-                return None
-            self.close = _no_op_close
-
-        with _patch("run_agent.AIAgent.__init__", _capture_init):
-            agent._spawn_background_review(
-                messages_snapshot=[{"role": "user", "content": "x"}],
-                review_memory=True,
-                review_skills=False,
+        with _patch("hermes_cli.config.load_config", return_value=cfg), _patch(
+            "run_agent.AIAgent.__init__"
+        ) as review_init:
+            _run_review_in_thread(
+                agent,
+                [{"role": "user", "content": "x"}],
+                "Review memory",
             )
-            # Wait for the spawned thread to actually execute
-            import time
-            for _ in range(30):
-                if "api_mode" in captured:
-                    break
-                time.sleep(0.1)
 
-        assert captured.get("api_mode") == "codex_responses", (
-            f"review fork should be downgraded to codex_responses when "
-            f"parent is codex_app_server; got {captured.get('api_mode')!r}"
-        )
+        review_init.assert_not_called()
 
 
 class TestErrorHandling:

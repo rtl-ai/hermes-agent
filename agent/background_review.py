@@ -324,16 +324,19 @@ def _resolve_review_runtime(
 ) -> Dict[str, Any]:
     """Resolve provider/model/credentials for the review fork.
 
-    Default (auto / unset / same as parent): inherit the parent's live runtime
-    (with codex_app_server -> codex_responses downgrade). ``routed`` is False —
+    Default (auto / unset / same as parent): inherit the parent's live runtime.
+    ``routed`` is False —
     the fork uses the main model and the warm cache, exactly as before. When
     ``auxiliary.background_review.{provider,model}`` names a concrete model
     different from the parent's, resolve that runtime and set ``routed=True``.
+
+    A default review cannot run on ``codex_app_server``: its stateless Hermes
+    MCP bridge intentionally omits the memory and skill-write tools this worker
+    exists to use. Mark that inherited runtime for a fail-closed skip. An
+    explicitly routed auxiliary model remains eligible.
     """
     parent_runtime = agent._current_main_runtime()
     parent_api_mode = parent_runtime.get("api_mode") or None
-    if parent_api_mode == "codex_app_server":
-        parent_api_mode = "codex_responses"
     parent = {
         "provider": agent.provider,
         "model": agent.model,
@@ -347,6 +350,8 @@ def _resolve_review_runtime(
         "args": list(getattr(agent, "acp_args", []) or []),
         "routed": False,
     }
+    if parent_api_mode == "codex_app_server":
+        parent["skip_reason"] = "codex_app_server lacks background-review write tools"
     task = _background_review_task_config(task_cfg)
     task_provider = (str(task.get("provider", "")).strip() or None)
     task_model = (str(task.get("model", "")).strip() or None)
@@ -1209,7 +1214,7 @@ def _run_review_in_thread(
         with thread_scoped_silence():
             # Inherit the parent agent's live runtime (provider, model,
             # base_url, api_key, api_mode) so the fork uses the exact
-            # same credentials the main turn is using.  Without this,
+            # same credentials and runtime the main turn is using. Without this,
             # AIAgent.__init__ re-runs auto-resolution from env vars,
             # which fails for OAuth-only providers, session-scoped
             # creds, or credential-pool setups where the resolver can't
@@ -1218,9 +1223,13 @@ def _run_review_in_thread(
             # _resolve_review_runtime() returns the parent's live runtime by
             # default (routed=False; main model, warm cache), or — when the user
             # set auxiliary.background_review.{provider,model} to a different
-            # model — that model's runtime (routed=True). The codex_app_server
-            # -> codex_responses downgrade is applied inside the resolver.
+            # model — that model's runtime (routed=True). The default
+            # codex_app_server path is skipped because its stateless MCP bridge
+            # cannot perform the review's memory/skill writes safely.
             _rt = _resolve_review_runtime(agent, task_cfg)
+            if _rt.get("skip_reason"):
+                logger.debug("Skipping background review: %s", _rt["skip_reason"])
+                return
             _routed = bool(_rt.get("routed"))
             # skip_memory=True keeps the review fork from
             # touching external memory plugins (honcho, mem0,

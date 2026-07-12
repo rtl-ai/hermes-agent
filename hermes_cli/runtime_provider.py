@@ -406,6 +406,54 @@ def _maybe_apply_codex_app_server_runtime(
     return api_mode
 
 
+def _resolve_codex_app_server_runtime_if_enabled(
+    *,
+    requested_provider: str,
+    model_cfg: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return a Codex-owned runtime before Hermes credential resolution.
+
+    ``codex app-server`` authenticates from Codex's own home and does not use
+    the Hermes OAuth credential pool. Resolving that pool first is harmful:
+    a direct-Responses 429 cooldown can block app-server even while the native
+    Codex CLI is healthy. Keep the stores separate and let the child process
+    perform its own authentication.
+    """
+    provider = str(requested_provider or "").strip().lower()
+    if provider == "auto" and isinstance(model_cfg, dict):
+        configured = str(model_cfg.get("provider") or "").strip().lower()
+        if configured in {"openai", "openai-codex"}:
+            provider = configured
+
+    api_mode = _maybe_apply_codex_app_server_runtime(
+        provider=provider,
+        api_mode="codex_responses" if provider == "openai-codex" else "chat_completions",
+        model_cfg=model_cfg,
+    )
+    if api_mode != "codex_app_server":
+        return None
+
+    configured_base = ""
+    if isinstance(model_cfg, dict):
+        configured_base = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+    base_url = configured_base or (
+        DEFAULT_CODEX_BASE_URL
+        if provider == "openai-codex"
+        else "https://api.openai.com/v1"
+    )
+    return {
+        "provider": provider,
+        "api_mode": "codex_app_server",
+        "base_url": base_url,
+        # A non-secret sentinel satisfies generic runtime validation. The
+        # app-server subprocess reads its real credentials from CODEX_HOME.
+        "api_key": "codex-app-server",
+        "source": "codex-app-server",
+        "credential_pool": None,
+        "requested_provider": requested_provider,
+    }
+
+
 def _resolve_runtime_from_pool_entry(
     *,
     provider: str,
@@ -1657,7 +1705,9 @@ def resolve_runtime_provider(
     # for a provider the user explicitly turned off.
     #
     # Fail fast with a typed error so the fallback chain can advance to
-    # the next provider instead of using a disabled one.
+    # the next provider instead of using a disabled one. Checked before the
+    # app-server shortcut below so a disabled provider can't slip through
+    # via app-server routing.
     from hermes_cli.config import is_provider_enabled, load_config
     _full_cfg = load_config()
     _provs_cfg = _full_cfg.get("providers") if isinstance(_full_cfg, dict) else None
@@ -1668,6 +1718,21 @@ def resolve_runtime_provider(
                 f"provider {requested_provider!r} is disabled in config "
                 f"(providers.{requested_provider}.enabled: false)"
             )
+
+    # App-server is a Codex-owned execution/auth boundary. Resolve it before
+    # Hermes' credential pool so a stale direct-Responses quota cooldown cannot
+    # prevent an otherwise healthy native Codex session from starting.
+    # Explicit credentials/endpoints must retain the normal explicit-runtime
+    # precedence and metadata. They already bypass the credential pool below,
+    # so the early app-server shortcut is only needed for the configured
+    # default/provider-only path.
+    if not explicit_api_key and not explicit_base_url:
+        app_server_runtime = _resolve_codex_app_server_runtime_if_enabled(
+            requested_provider=requested_provider,
+            model_cfg=_get_model_config(),
+        )
+        if app_server_runtime is not None:
+            return app_server_runtime
 
     if requested_provider == "moa":
         return {

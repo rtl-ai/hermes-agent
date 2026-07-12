@@ -41,7 +41,7 @@ class _FakeAgent:
         }
 
 
-def test_routing_auto_inherits_parent_and_downgrades_codex_app_server():
+def test_routing_auto_marks_parent_codex_app_server_for_skip():
     agent = _FakeAgent()
     cfg = {"auxiliary": {"background_review": {"provider": "auto", "model": ""}}}
     with patch("hermes_cli.config.load_config", return_value=cfg):
@@ -49,7 +49,8 @@ def test_routing_auto_inherits_parent_and_downgrades_codex_app_server():
     assert rt["routed"] is False
     assert rt["provider"] == "openai-codex"
     assert rt["model"] == "gpt-5.5"
-    assert rt["api_mode"] == "codex_responses"  # downgraded so agent-loop tools dispatch
+    assert rt["api_mode"] == "codex_app_server"
+    assert "write tools" in rt["skip_reason"]
 
 
 def test_routing_to_different_model_marks_routed_and_resolves_credentials():

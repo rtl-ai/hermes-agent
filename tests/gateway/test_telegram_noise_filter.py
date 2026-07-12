@@ -308,6 +308,19 @@ def test_telegram_final_response_redacts_auth_secrets():
     assert "sk-live" not in sanitized
 
 
+def test_chat_quota_wrapped_as_auth_is_classified_as_rate_limit():
+    raw = (
+        "Provider authentication failed: Codex provider quota exhausted (429); "
+        "credentials are still valid."
+    )
+
+    for platform in (Platform.TELEGRAM, Platform.SLACK):
+        sanitized = _sanitize_gateway_final_response(platform, raw)
+
+        assert "rate-limiting" in sanitized.lower()
+        assert "authentication failed" not in sanitized.lower()
+
+
 def test_telegram_final_response_keeps_normal_answers():
     """Normal assistant content should not be rewritten."""
     answer = "Here is the clean summary you asked for."

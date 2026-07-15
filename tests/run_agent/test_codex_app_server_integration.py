@@ -378,6 +378,38 @@ class TestRunConversationCodexPath:
 
         assert captured["cwd"] == str(tmp_path)
 
+    def test_dedicated_codex_home_reaches_app_server_session(
+        self, monkeypatch, tmp_path
+    ):
+        from agent.transports.codex_app_server_session import (
+            CodexAppServerSession, TurnResult,
+        )
+
+        captured = {}
+
+        def fake_init(self, **kwargs):
+            captured.update(kwargs)
+            self._thread_id = "thread-stub-1"
+
+        def fake_run_turn(self, user_input: str, **kwargs):
+            return TurnResult(
+                final_text="ok",
+                projected_messages=[{"role": "assistant", "content": "ok"}],
+                turn_id="turn-stub-1",
+                thread_id="thread-stub-1",
+            )
+
+        codex_home = tmp_path / "codex-home"
+        monkeypatch.setenv("HERMES_CODEX_APP_SERVER_HOME", str(codex_home))
+        monkeypatch.setattr(CodexAppServerSession, "__init__", fake_init)
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+
+        agent = _make_codex_agent()
+        with patch.object(agent, "_spawn_background_review", return_value=None):
+            agent.run_conversation("hi")
+
+        assert captured["codex_home"] == str(codex_home)
+
     def _capture_routing_agent(self, monkeypatch):
         """Build a codex agent with a CodexAppServerSession stub that captures
         the request_routing passed at construction time, so we can assert how
@@ -649,6 +681,30 @@ class TestSessionRetirementOnRunAgent:
         assert agent._codex_session is None
         assert result["completed"] is False
         assert "codex segfaulted" in result["error"]
+
+
+class TestCodexSessionResourceCleanup:
+    @pytest.mark.parametrize("cleanup_method", ["release_clients", "close"])
+    def test_agent_cleanup_closes_codex_session(self, cleanup_method):
+        agent = _make_codex_agent()
+        codex_session = MagicMock()
+        agent._codex_session = codex_session
+
+        getattr(agent, cleanup_method)()
+
+        codex_session.close.assert_called_once_with()
+        assert agent._codex_session is None
+
+    def test_cleanup_clears_session_even_when_close_raises(self):
+        agent = _make_codex_agent()
+        codex_session = MagicMock()
+        codex_session.close.side_effect = RuntimeError("stuck child")
+        agent._codex_session = codex_session
+
+        agent.release_clients()
+
+        codex_session.close.assert_called_once_with()
+        assert agent._codex_session is None
 
 
 class TestCodexToolProgressBridge:

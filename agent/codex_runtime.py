@@ -397,8 +397,17 @@ def run_codex_app_server_turn(
             except Exception:
                 logger.debug("codex tool-progress callback raised", exc_info=True)
 
+        codex_home = os.environ.get("HERMES_CODEX_APP_SERVER_HOME", "").strip()
+        if codex_home:
+            # A dedicated home lets gateway deployments keep Codex auth while
+            # avoiding unrelated user-level MCP servers in every cached agent.
+            codex_home = os.path.abspath(os.path.expanduser(codex_home))
+        else:
+            codex_home = None
+
         agent._codex_session = CodexAppServerSession(
             cwd=cwd,
+            codex_home=codex_home,
             approval_callback=approval_callback,
             request_routing=_ServerRequestRouting(
                 auto_approve_exec=auto_approve_requests,

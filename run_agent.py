@@ -4547,6 +4547,20 @@ class AIAgent:
         except Exception:
             pass
 
+    def _close_codex_app_server_session(self) -> None:
+        """Close the Codex subprocess owned by this agent, if any."""
+        codex_session = getattr(self, "_codex_session", None)
+        if codex_session is None:
+            return
+        try:
+            codex_session.close()
+        except Exception:
+            pass
+        finally:
+            # Always clear the reference so repeated cleanup is idempotent and
+            # a failed close cannot be reused by a later turn.
+            self._codex_session = None
+
     def release_clients(self) -> None:
         """Release LLM client resources WITHOUT tearing down session tool state.
 
@@ -4564,6 +4578,8 @@ class AIAgent:
           - OpenAI/httpx client pool (big chunk of held memory + sockets;
             the rebuilt agent gets a fresh client anyway)
           - Active child subagents (per-turn artefacts; safe to drop)
+          - Codex app-server subprocess (owned by this agent and otherwise
+            orphaned when a cached agent is evicted)
 
         Safe to call multiple times.  Distinct from close() — which is the
         hard teardown for actual session boundaries (/new, /reset, session
@@ -4585,6 +4601,10 @@ class AIAgent:
                         pass
         except Exception:
             pass
+
+        # Close the per-agent Codex subprocess before dropping this agent —
+        # otherwise orphaned once this cached agent is evicted.
+        self._close_codex_app_server_session()
 
         # Retire the OpenAI/httpx client to release sockets immediately.
         # #70773: eviction runs on the gateway's memory-manager thread — a
@@ -4621,6 +4641,7 @@ class AIAgent:
         - Computer-use backend sessions and target/ref state
         - Active child agents (subagent delegation)
         - OpenAI/httpx client connections
+        - Codex app-server subprocesses and their MCP descendants
 
         Safe to call multiple times (idempotent).  Each cleanup step is
         independently guarded so a failure in one does not prevent the rest.
@@ -4682,7 +4703,10 @@ class AIAgent:
         except Exception:
             pass
 
-        # 6. Close the OpenAI/httpx client
+        # 6. Close the per-agent Codex subprocess and its MCP descendants.
+        self._close_codex_app_server_session()
+
+        # 7. Close the OpenAI/httpx client
         try:
             client = getattr(self, "client", None)
             if client is not None:
@@ -4702,22 +4726,7 @@ class AIAgent:
         except Exception:
             pass
 
-        # 6c. Close the Codex app-server session. The runtime already drops
-        # it on turn crash / retirement (agent/codex_runtime.py), but hard
-        # teardown had no owner — a /new, /reset, or session expiry left the
-        # app-server child process running until interpreter exit. Clear the
-        # attribute BEFORE close() so a concurrent reader can't grab a
-        # half-closed session, and so a raising close() can't strand a stale
-        # reference behind.
-        try:
-            codex_session = getattr(self, "_codex_session", None)
-            if codex_session is not None:
-                self._codex_session = None
-                codex_session.close()
-        except Exception:
-            pass
-
-        # 7. Free conversation history.  Mirrors _release_evicted_agent_soft's
+        # 8. Free conversation history.  Mirrors _release_evicted_agent_soft's
         # soft-eviction clear — close() is the hard teardown for true session
         # boundaries (/new, /reset, session expiry), so the message list won't
         # be reused.  Drops the reference proactively rather than waiting for
@@ -4737,7 +4746,7 @@ class AIAgent:
         except Exception:
             pass
 
-        # 8. Finalize the owned SQLite session row unless this agent is only a
+        # 9. Finalize the owned SQLite session row unless this agent is only a
         # temporary helper that deliberately handed session ownership forward
         # (manual compression helpers that rotate to a continuation session_id,
         # or background-review forks that share the live parent's session_id and

@@ -281,6 +281,7 @@ def get_tool_definitions(
     disabled_toolsets: Optional[List[str]] = None,
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
+    context_length_override: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
@@ -296,6 +297,14 @@ def get_tool_definitions(
             tool_search / tool_describe bridge handlers so they can read the
             real catalog, not the already-collapsed one. Public callers should
             leave this False.
+        context_length_override: When set, used as the tool_search activation
+            gate's context length instead of resolving it from the static
+            top-level `model:` config block. Callers that have just switched
+            to a fallback provider with a different context window (see
+            ``try_activate_fallback``) should pass the fallback's actual
+            context length here — otherwise the gate stays keyed to the
+            primary model's window even though the request is now going to
+            the fallback backend. See issue #22387.
 
     Returns:
         Filtered list of OpenAI-format tool definitions.
@@ -323,6 +332,7 @@ def get_tool_definitions(
             cfg_fp,
             bool(os.environ.get("HERMES_KANBAN_TASK")),
             bool(skip_tool_search_assembly),
+            context_length_override,
         )
         cached = _tool_defs_cache.get(cache_key)
         if cached is not None:
@@ -335,7 +345,8 @@ def get_tool_definitions(
             return list(cached)
 
     result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
-                                       skip_tool_search_assembly=skip_tool_search_assembly)
+                                       skip_tool_search_assembly=skip_tool_search_assembly,
+                                       context_length_override=context_length_override)
     if quiet_mode:
         # Cache the freshly-computed list, but hand callers a shallow copy so
         # downstream mutations (e.g. run_agent appending memory/LCM tool
@@ -359,6 +370,7 @@ def _compute_tool_definitions(
     disabled_toolsets: Optional[List[str]] = None,
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
+    context_length_override: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     # Determine which tool names the caller wants
@@ -548,7 +560,11 @@ def _compute_tool_definitions(
         from tools.tool_search import assemble_tool_defs, load_config as _load_ts_config
         ts_cfg = _load_ts_config()
         if not skip_tool_search_assembly and ts_cfg.enabled != "off":
-            context_length = _resolve_active_context_length()
+            context_length = (
+                context_length_override
+                if context_length_override is not None
+                else _resolve_active_context_length()
+            )
             assembly = assemble_tool_defs(
                 filtered_tools,
                 context_length=context_length,

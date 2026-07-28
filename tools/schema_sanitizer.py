@@ -438,6 +438,85 @@ def strip_pattern_and_format(tools: list[dict]) -> tuple[list[dict], int]:
     return tools, stripped
 
 
+_MAX_LENGTH_SAFE_LIMIT = 2000
+
+
+def strip_oversized_max_length(
+    tools: list[dict], limit: int = _MAX_LENGTH_SAFE_LIMIT
+) -> tuple[list[dict], int]:
+    """Strip ``maxLength`` values at/above ``limit`` from tool schemas.
+
+    Reactive sanitizer, invoked only when llama.cpp's grammar compiler has
+    rejected a tool schema.  llama.cpp's ``json-schema-to-grammar`` compiler
+    expands ``maxLength`` into a bounded-repetition GBNF rule; values at or
+    above its hard-coded repetition cap (~2000, see ``MAX_REPETITION_
+    THRESHOLD``) produce an unparseable rule and the *whole* tool-call
+    grammar is rejected — not just the offending tool. Reported to trigger
+    even when only nested one object deep, i.e. the top-level schema's own
+    ``maxLength`` can look safe while a nested one still breaks the build.
+    See ggml-org/llama.cpp#25746, #25923 (both open as of 2026-07-25;
+    fix candidate PR #25927 unmerged).
+
+    Cloud providers accept large ``maxLength`` values fine and rely on them
+    as prompting hints, so — matching ``strip_pattern_and_format`` — we keep
+    the keyword in the default schema and only strip on demand.
+
+    Args:
+        tools: OpenAI-format tool list, mutated in place for efficiency.
+            Callers that need to preserve the original should deep-copy first.
+        limit: values >= this are stripped. Default mirrors llama.cpp's
+            current (as of 2026-07) hard-coded repetition-count ceiling,
+            which is not yet configurable upstream (PR #21003, unmerged).
+
+    Returns:
+        ``(tools, stripped_count)`` — the same list reference plus a count of
+        how many ``maxLength`` keywords were removed across all tools.
+    """
+    if not tools:
+        return tools, 0
+
+    stripped = 0
+
+    def _walk(node: Any) -> None:
+        nonlocal stripped
+        if isinstance(node, dict):
+            max_len = node.get("maxLength")
+            if isinstance(max_len, (int, float)) and not isinstance(max_len, bool) and max_len >= limit:
+                node.pop("maxLength", None)
+                stripped += 1
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+
+        # OpenAI-format: {"function": {"parameters": {...}}}
+        fn = tool.get("function")
+        if isinstance(fn, dict):
+            params = fn.get("parameters")
+            if isinstance(params, dict):
+                _walk(params)
+                continue
+
+        # Responses-format: {"name": "...", "parameters": {...}}
+        params = tool.get("parameters")
+        if isinstance(params, dict):
+            _walk(params)
+            continue
+
+    if stripped:
+        logger.info(
+            "schema_sanitizer: stripped %d oversized maxLength keyword(s) "
+            "(>= %d) from tool schemas (llama.cpp grammar-parse recovery)",
+            stripped, limit,
+        )
+    return tools, stripped
+
+
 def strip_slash_enum(tools: list[dict]) -> tuple[list[dict], int]:
     """Strip ``enum`` keywords whose string values contain a forward slash.
 

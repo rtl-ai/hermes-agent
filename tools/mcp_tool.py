@@ -5234,6 +5234,7 @@ def refresh_agent_mcp_tools(
     enabled_override=None,
     disabled_override=None,
     quiet_mode: bool = True,
+    context_length_override: Optional[int] = None,
 ) -> set:
     """Re-derive an already-built agent's tool snapshot from the live registry.
 
@@ -5250,6 +5251,13 @@ def refresh_agent_mcp_tools(
     ``disabled_toolsets`` (the same filtering it was built with) and diffs by
     tool **name** (not count — a count compare misses an equal-size add/remove
     swap).
+
+    ``context_length_override``, when passed, is forwarded straight to
+    ``get_tool_definitions`` so the tool_search deferral gate is re-evaluated
+    against it instead of the statically-configured model's context length.
+    Callers that just switched the agent onto a fallback backend with a
+    different context window (see ``try_activate_fallback``) should pass the
+    fallback's actual context length here. See issue #22387.
 
     Crucially it is **additive-preserving**: ``get_tool_definitions`` returns
     only the registry-derived tools, but ``agent_init`` appends two further
@@ -5302,6 +5310,7 @@ def refresh_agent_mcp_tools(
             enabled_toolsets=enabled,
             disabled_toolsets=disabled,
             quiet_mode=quiet_mode,
+            context_length_override=context_length_override,
         )
         or []
     )

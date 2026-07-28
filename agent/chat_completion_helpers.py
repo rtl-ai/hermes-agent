@@ -1525,26 +1525,32 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # LM Studio: preload before probing the fallback's context length.
         agent._ensure_lmstudio_runtime_loaded()
 
+        # Resolve the fallback model's actual context length once, shared by
+        # the context-compressor update and the tool_search re-gate below —
+        # get_model_context_length() can hit a live provider probe (e.g. the
+        # OpenRouter /models endpoint), so we avoid paying that cost twice on
+        # what is already a latency-sensitive failover path.
+        # Also pass _config_context_length so the explicit config override
+        # (model.context_length in config.yaml) is respected — without this,
+        # the fallback activation drops to 128K even when config says 204800.
+        from agent.model_metadata import get_model_context_length
+        # ``agent.api_key`` may be callable (Entra ID); the
+        # context-length resolver expects a string for live
+        # probes. Foundry typically resolves via config/static
+        # catalogs anyway, so coerce defensively.
+        _fb_ctx_api_key = agent.api_key if isinstance(agent.api_key, str) else ""
+        fb_context_length = get_model_context_length(
+            agent.model, base_url=agent.base_url,
+            api_key=_fb_ctx_api_key, provider=agent.provider,
+            config_context_length=getattr(agent, "_config_context_length", None),
+            custom_providers=getattr(agent, "_custom_providers", None),
+        )
+
         # Update context compressor limits for the fallback model.
         # Without this, compression decisions use the primary model's
         # context window (e.g. 200K) instead of the fallback's (e.g. 32K),
         # causing oversized sessions to overflow the fallback.
-        # Also pass _config_context_length so the explicit config override
-        # (model.context_length in config.yaml) is respected — without this,
-        # the fallback activation drops to 128K even when config says 204800.
         if hasattr(agent, 'context_compressor') and agent.context_compressor:
-            from agent.model_metadata import get_model_context_length
-            # ``agent.api_key`` may be callable (Entra ID); the
-            # context-length resolver expects a string for live
-            # probes. Foundry typically resolves via config/static
-            # catalogs anyway, so coerce defensively.
-            _fb_ctx_api_key = agent.api_key if isinstance(agent.api_key, str) else ""
-            fb_context_length = get_model_context_length(
-                agent.model, base_url=agent.base_url,
-                api_key=_fb_ctx_api_key, provider=agent.provider,
-                config_context_length=getattr(agent, "_config_context_length", None),
-                custom_providers=getattr(agent, "_custom_providers", None),
-            )
             agent.context_compressor.update_model(
                 model=agent.model,
                 context_length=fb_context_length,
@@ -1552,6 +1558,29 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 api_key=getattr(agent, "api_key", ""),  # callable preserved → call_llm
                 provider=agent.provider,
                 api_mode=agent.api_mode,
+            )
+
+        # Re-derive agent.tools against the fallback's actual context length.
+        # Without this, the tool_search deferral gate stays keyed to whatever
+        # context_length the *previous* model resolved (usually the much
+        # larger primary/Codex window), so a fallback with a smaller context
+        # window (e.g. a local llama.cpp backend) can receive a much larger,
+        # non-deferred tool payload than it should. Use the shared
+        # refresh_agent_mcp_tools helper (not a bare get_tool_definitions
+        # reassignment) so post-build-injected memory/LCM tool schemas are
+        # preserved rather than silently dropped. See #22387.
+        try:
+            from tools.mcp_tool import refresh_agent_mcp_tools
+            refresh_agent_mcp_tools(
+                agent,
+                quiet_mode=True,
+                context_length_override=fb_context_length,
+            )
+        except Exception as _tools_exc:
+            logger.debug(
+                "Fallback to %s/%s: could not re-derive agent.tools for the "
+                "fallback's context length: %s",
+                fb_provider, fb_model, _tools_exc,
             )
 
         # Keep the prompt's self-identity in sync with the model actually

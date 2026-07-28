@@ -689,16 +689,30 @@ def classify_api_error(
 
     # llama.cpp's ``json-schema-to-grammar`` converter (used by its OAI
     # server to build GBNF tool-call parsers) rejects regex escape classes
-    # like ``\d``/``\w``/``\s`` and most ``format`` values. MCP servers
-    # routinely emit ``"pattern": "\\d{4}-\\d{2}-\\d{2}"`` for date/phone/
-    # email params. llama.cpp surfaces this as HTTP 400 with one of a few
-    # recognizable phrases; on match we strip ``pattern``/``format`` from
-    # ``self.tools`` in the retry loop and retry once. Cloud providers are
-    # unaffected — they accept these keywords and we never hit this branch.
+    # like ``\d``/``\w``/``\s``, most ``format`` values, oversized nested
+    # ``maxLength`` (>= ~2000), and empty-object/param-heavy schemas. MCP
+    # servers routinely emit these shapes. llama.cpp surfaces all of these
+    # as HTTP 400 with one of a few recognizable phrases; on match we strip
+    # the offending keywords from ``self.tools`` in the retry loop and
+    # retry once. Cloud providers are unaffected — they accept these
+    # keywords and we never hit this branch.
+    #
+    # "failed to parse grammar" (wrapped as "Failed to initialize
+    # samplers: failed to parse grammar") is the phrase current llama.cpp
+    # builds (confirmed on b10121, 2026-07-24) actually return — the
+    # original "error parsing grammar" phrasing this branch was written
+    # against no longer appears verbatim, so real incidents were falling
+    # through to the generic retry path and exhausting max_retries with a
+    # guaranteed-identical 400 every time. See incident 2026-07-26.
     if (
-        status_code == 400
+        # Streaming responses can surface this without a parsable status
+        # code (the SDK raises mid-stream), so accept a missing code too.
+        # The phrase match below is llama.cpp-specific enough to stand on
+        # its own. Mirrors upstream hermes-agent PR #67349.
+        status_code in (400, None)
         and (
             "error parsing grammar" in error_msg
+            or "failed to parse grammar" in error_msg
             or "json-schema-to-grammar" in error_msg
             or (
                 "unable to generate parser" in error_msg

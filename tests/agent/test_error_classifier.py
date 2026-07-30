@@ -950,6 +950,32 @@ class TestClassifyApiError:
         result = classify_api_error(e, provider="openai-compatible")
         assert result.reason == FailoverReason.llama_cpp_grammar_pattern
 
+    def test_llama_cpp_failed_to_parse_grammar_phrase(self):
+        """Current llama.cpp builds (b10121+, confirmed live 2026-07-29
+        against qwen36-27b-heretic-uncensored-q5km) emit 'failed to parse
+        grammar' for the nested+oversized-maxLength GBNF compile failure —
+        the older 'error parsing grammar' phrasing no longer appears
+        verbatim, so this must be matched independently rather than assumed
+        covered by the old pattern."""
+        e = MockAPIError(
+            "Failed to initialize samplers: failed to parse grammar",
+            status_code=400,
+        )
+        result = classify_api_error(e, provider="openai-compatible")
+        assert result.reason == FailoverReason.llama_cpp_grammar_pattern
+        assert result.retryable is True
+        assert result.should_compress is False
+
+    def test_llama_cpp_failed_to_parse_grammar_requires_400(self):
+        """Same phrase at a non-400 status must not be swept into this
+        branch — mirrors the existing 'error parsing grammar' + 500 guard."""
+        e = MockAPIError(
+            "Failed to initialize samplers: failed to parse grammar",
+            status_code=500,
+        )
+        result = classify_api_error(e, provider="openai-compatible")
+        assert result.reason != FailoverReason.llama_cpp_grammar_pattern
+
     def test_llama_cpp_grammar_requires_400(self):
         """A 500 with the same phrase isn't the llama.cpp grammar case."""
         e = MockAPIError("error parsing grammar", status_code=500)

@@ -6020,6 +6020,7 @@ def refresh_agent_mcp_tools(
     enabled_override=None,
     disabled_override=None,
     quiet_mode: bool = True,
+    context_length_override=None,
 ) -> set:
     """Re-derive an already-built agent's tool snapshot from the live registry.
 
@@ -6047,6 +6048,13 @@ def refresh_agent_mcp_tools(
     surface.  The new ``(tools, valid_tool_names)`` pair is published together
     under ``_agent_tools_lock`` so a concurrent reader never sees a
     cross-attribute half-swap.
+
+    ``context_length_override``, when set, is forwarded straight through to
+    ``get_tool_definitions`` as its own ``context_length_override`` — for
+    callers that just switched the agent onto a fallback backend with a
+    different context window (see ``try_activate_fallback``), so the
+    tool_search deferral gate uses the fallback's window instead of whatever
+    the previous model resolved. See issue #22387.
 
     Returns the set of newly-added tool names (empty when nothing changed), so
     callers can decide whether to notify the user / re-emit session info.  The
@@ -6088,6 +6096,7 @@ def refresh_agent_mcp_tools(
             enabled_toolsets=enabled,
             disabled_toolsets=disabled,
             quiet_mode=quiet_mode,
+            context_length_override=context_length_override,
         )
         or []
     )

@@ -98,6 +98,49 @@ def test_refresh_passes_agent_toolset_filters(monkeypatch):
     assert seen["disabled_toolsets"] == ["messaging"]
 
 
+def test_refresh_forwards_context_length_override(monkeypatch):
+    """context_length_override, when passed, reaches get_tool_definitions
+    untouched -- for callers that just switched the agent onto a fallback
+    backend with a different context window (see try_activate_fallback in
+    chat_completion_helpers.py), so the tool_search deferral gate uses the
+    fallback's window instead of whatever the previous model resolved.
+    See issue #22387."""
+    agent = _agent(["a"])
+    seen = {}
+
+    import model_tools
+
+    def _capture(**kw):
+        seen.update(kw)
+        return [_tool("a"), _tool("b")]
+
+    monkeypatch.setattr(model_tools, "get_tool_definitions", _capture)
+
+    mcp_tool.refresh_agent_mcp_tools(agent, context_length_override=32768)
+
+    assert seen["context_length_override"] == 32768
+
+
+def test_refresh_default_context_length_override_is_none(monkeypatch):
+    """Callers that don't pass context_length_override forward None, so
+    get_tool_definitions falls back to its own _resolve_active_context_length()
+    resolution -- unchanged default behavior for every pre-existing caller."""
+    agent = _agent(["a"])
+    seen = {}
+
+    import model_tools
+
+    def _capture(**kw):
+        seen.update(kw)
+        return [_tool("a"), _tool("b")]
+
+    monkeypatch.setattr(model_tools, "get_tool_definitions", _capture)
+
+    mcp_tool.refresh_agent_mcp_tools(agent)
+
+    assert seen["context_length_override"] is None
+
+
 def test_refresh_preserves_memory_provider_and_context_engine_tools(monkeypatch):
     """B1 regression: a rebuild must NOT drop post-build-injected tools.
 

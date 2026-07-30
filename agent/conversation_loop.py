@@ -3958,42 +3958,52 @@ def run_conversation(
                 # ── llama.cpp grammar-parse recovery ──────────────────
                 # llama.cpp's ``json-schema-to-grammar`` converter rejects
                 # regex escape classes (``\d``, ``\w``, ``\s``) and most
-                # ``format`` values in tool schemas.  MCP servers emit
-                # these routinely for date/phone/email params.  Recovery:
-                # strip ``pattern``/``format`` from ``agent.tools`` and
-                # retry once.  We keep the keywords by default so cloud
-                # providers get the full prompting hints; this branch
-                # fires only for users on llama.cpp's OAI server.
+                # ``format`` values, plus oversized nested ``maxLength``
+                # (>= ~2000, see ggml-org/llama.cpp#25746/#25923) in tool
+                # schemas.  MCP servers emit these routinely.  Recovery:
+                # strip ``pattern``/``format``/oversized nested ``maxLength``
+                # from ``agent.tools`` and retry once.  We keep the keywords
+                # by default so cloud providers get the full prompting
+                # hints; this branch fires only for users on llama.cpp's
+                # OAI server.
                 if (
                     classified.reason == FailoverReason.llama_cpp_grammar_pattern
                     and not _retry.llama_cpp_grammar_retry_attempted
                 ):
                     _retry.llama_cpp_grammar_retry_attempted = True
                     try:
-                        from tools.schema_sanitizer import strip_pattern_and_format
-                        _, _stripped = strip_pattern_and_format(agent.tools)
+                        from tools.schema_sanitizer import (
+                            strip_oversized_max_length,
+                            strip_pattern_and_format,
+                        )
+                        _, _stripped_pf = strip_pattern_and_format(agent.tools)
+                        _, _stripped_ml = strip_oversized_max_length(agent.tools)
                     except Exception as _strip_exc:  # pragma: no cover — defensive
                         logger.warning(
                             "%sllama.cpp grammar recovery: strip helper failed: %s",
                             agent.log_prefix, _strip_exc,
                         )
-                        _stripped = 0
+                        _stripped_pf = 0
+                        _stripped_ml = 0
+                    _stripped = _stripped_pf + _stripped_ml
                     if _stripped:
                         agent._vprint(
                             f"{agent.log_prefix}⚠️  llama.cpp rejected tool schema grammar — "
-                            f"stripped {_stripped} pattern/format keyword(s), retrying...",
+                            f"stripped {_stripped_pf} pattern/format keyword(s) and "
+                            f"{_stripped_ml} oversized maxLength keyword(s), retrying...",
                             force=True,
                         )
                         logger.warning(
                             "%sllama.cpp grammar recovery: stripped %d "
-                            "pattern/format keyword(s) from tool schemas",
-                            agent.log_prefix, _stripped,
+                            "pattern/format and %d oversized maxLength keyword(s) "
+                            "from tool schemas",
+                            agent.log_prefix, _stripped_pf, _stripped_ml,
                         )
                         continue
                     # No keywords found to strip — fall through to normal
                     # retry path rather than loop forever on the same error.
                     logger.warning(
-                        "%sllama.cpp grammar error but no pattern/format "
+                        "%sllama.cpp grammar error but no pattern/format/maxLength "
                         "keywords to strip — falling through to normal retry",
                         agent.log_prefix,
                     )

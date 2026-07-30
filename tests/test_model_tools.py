@@ -587,3 +587,72 @@ class TestDisabledToolsetsPostureToolset:
             )
         }
         assert "write_file" not in no_file
+
+
+# =========================================================================
+# context_length_override (issue #22387)
+# =========================================================================
+
+class TestContextLengthOverride:
+    """context_length_override lets a caller that just switched the agent
+    onto a fallback backend (see try_activate_fallback ->
+    refresh_agent_mcp_tools -> get_tool_definitions) hand the tool_search
+    activation gate the fallback's actual context window, instead of the
+    gate silently keying off whatever the *previous* model resolved via
+    _resolve_active_context_length(). Both tests stub out
+    tools.tool_search.assemble_tool_defs so the assertion is on which
+    context_length value reaches the gate, not on real MCP/plugin tool
+    volume (which varies by test environment and would make deferral
+    activation non-deterministic)."""
+
+    def test_override_bypasses_resolver(self):
+        import model_tools
+        from tools.tool_search import AssemblyResult
+        from types import SimpleNamespace
+
+        seen = {}
+
+        def _fake_assemble(tool_defs, *, context_length, config):
+            seen["context_length"] = context_length
+            return AssemblyResult(tool_defs=tool_defs, activated=False)
+
+        with patch("tools.tool_search.load_config",
+                    return_value=SimpleNamespace(enabled="on")), \
+             patch("tools.tool_search.assemble_tool_defs",
+                   side_effect=_fake_assemble), \
+             patch.object(model_tools, "_resolve_active_context_length") as mock_resolve:
+            model_tools.get_tool_definitions(
+                enabled_toolsets=["hermes-telegram"],
+                context_length_override=4096,
+                quiet_mode=False,
+            )
+
+        assert seen["context_length"] == 4096
+        mock_resolve.assert_not_called()
+
+    def test_default_none_falls_back_to_resolver(self):
+        """Callers that don't pass context_length_override are unaffected --
+        the gate still resolves the active model's context length itself."""
+        import model_tools
+        from tools.tool_search import AssemblyResult
+        from types import SimpleNamespace
+
+        seen = {}
+
+        def _fake_assemble(tool_defs, *, context_length, config):
+            seen["context_length"] = context_length
+            return AssemblyResult(tool_defs=tool_defs, activated=False)
+
+        with patch("tools.tool_search.load_config",
+                    return_value=SimpleNamespace(enabled="on")), \
+             patch("tools.tool_search.assemble_tool_defs",
+                   side_effect=_fake_assemble), \
+             patch.object(model_tools, "_resolve_active_context_length",
+                          return_value=99999) as mock_resolve:
+            model_tools.get_tool_definitions(
+                enabled_toolsets=["hermes-telegram"],
+                quiet_mode=False,
+            )
+
+        mock_resolve.assert_called_once()
+        assert seen["context_length"] == 99999

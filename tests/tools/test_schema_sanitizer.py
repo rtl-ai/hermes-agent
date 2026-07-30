@@ -11,6 +11,7 @@ import copy
 
 from tools.schema_sanitizer import (
     sanitize_tool_schemas,
+    strip_oversized_max_length,
     strip_pattern_and_format,
     strip_slash_enum,
 )
@@ -620,6 +621,309 @@ def test_strip_responses_mixed_formats():
     # Verify structure preserved
     assert result[0]["function"]["parameters"]["type"] == "object"
     assert result[1]["parameters"]["type"] == "object"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# strip_oversized_max_length — reactive recovery for llama.cpp's bounded-
+# repetition GBNF compile failure. Empirically confirmed (2026-07-29,
+# qwen36-27b-heretic-uncensored-q5km, build b10121/555881ebc, 9 HTTP test
+# shapes) to require BOTH: (a) maxLength on a NESTED schema node — depth>=2,
+# reached via a tool's properties.<name> inside another object, or via array
+# items — AND (b) magnitude >= ~2000. Flat/top-level maxLength (depth 0) is
+# safe at any magnitude tested (up to 50000); nested maxLength below ~2000
+# is safe (tested down to 1). Neither condition alone triggers the bug.
+# See ggml-org/llama.cpp#25746, #25923 (open as of 2026-07-25).
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_strip_oversized_max_length_nested_object_stripped():
+    """Nested (depth>=2) + magnitude>=2000 -> stripped."""
+    tools = [_tool("submit_report", {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {
+                    "body": {"type": "string", "maxLength": 4000},
+                },
+                "required": ["body"],
+            },
+        },
+        "required": ["data"],
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 1
+    body = tools[0]["function"]["parameters"]["properties"]["data"]["properties"]["body"]
+    assert "maxLength" not in body
+    assert body["type"] == "string"
+
+
+def test_strip_oversized_max_length_array_items_stripped():
+    """Nested via array items + magnitude>=2000 -> stripped."""
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "lines": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": 5000},
+            },
+        },
+        "required": ["lines"],
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 1
+    assert "maxLength" not in tools[0]["function"]["parameters"]["properties"]["lines"]["items"]
+
+
+def test_strip_oversized_max_length_flat_top_level_preserved_any_magnitude():
+    """Flat/top-level maxLength (a tool's own direct property, depth 0) is
+    safe at ANY magnitude -- must survive untouched even at 50000."""
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "body": {"type": "string", "maxLength": 50000},
+        },
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 0
+    assert tools[0]["function"]["parameters"]["properties"]["body"]["maxLength"] == 50000
+
+
+def test_strip_oversized_max_length_four_stacked_top_level_fields_preserved():
+    """Four stacked top-level maxLength=4000 fields -- still all flat, all safe."""
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "a": {"type": "string", "maxLength": 4000},
+            "b": {"type": "string", "maxLength": 4000},
+            "c": {"type": "string", "maxLength": 4000},
+            "d": {"type": "string", "maxLength": 4000},
+        },
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 0
+
+
+def test_strip_oversized_max_length_nested_small_value_preserved():
+    """Nested but below the ~2000 threshold -> preserved."""
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {
+                    "body": {"type": "string", "maxLength": 10},
+                },
+            },
+        },
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 0
+    assert tools[0]["function"]["parameters"]["properties"]["data"]["properties"]["body"]["maxLength"] == 10
+
+
+def test_strip_oversized_max_length_nested_maxlength_1_preserved():
+    """Smallest meaningful nested value -- still safely below the threshold."""
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {"body": {"type": "string", "maxLength": 1}},
+            },
+        },
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 0
+
+
+def test_strip_oversized_max_length_nested_no_maxlength_control():
+    """Nesting alone, with no maxLength at all, is a no-op -- isolates
+    maxLength as the trigger keyword rather than nesting/objects-in-general."""
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {"body": {"type": "string"}},
+            },
+        },
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 0
+
+
+def test_strip_oversized_max_length_custom_limit_respected():
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {"body": {"type": "string", "maxLength": 100}},
+            },
+        },
+    })]
+    _, stripped = strip_oversized_max_length(tools, limit=50)
+    assert stripped == 1
+
+
+def test_strip_oversized_max_length_boundary_exactly_at_limit_stripped():
+    """maxLength exactly == limit is stripped (>=, not >)."""
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {"body": {"type": "string", "maxLength": 2000}},
+            },
+        },
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 1
+
+
+def test_strip_oversized_max_length_boundary_one_below_limit_preserved():
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {"body": {"type": "string", "maxLength": 1999}},
+            },
+        },
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 0
+
+
+def test_strip_oversized_max_length_responses_format_no_function_wrapper():
+    """Responses-format tools (no `function` wrapper) are also handled."""
+    tools = [{
+        "type": "function",
+        "name": "t",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "properties": {"body": {"type": "string", "maxLength": 4000}},
+                },
+            },
+        },
+    }]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 1
+    assert "maxLength" not in tools[0]["parameters"]["properties"]["data"]["properties"]["body"]
+
+
+def test_strip_oversized_max_length_is_idempotent():
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {"body": {"type": "string", "maxLength": 4000}},
+            },
+        },
+    })]
+    _, first = strip_oversized_max_length(tools)
+    _, second = strip_oversized_max_length(tools)
+    assert first == 1
+    assert second == 0
+
+
+def test_strip_oversized_max_length_empty_tools_returns_zero():
+    tools, stripped = strip_oversized_max_length([])
+    assert tools == []
+    assert stripped == 0
+
+
+def test_strip_oversized_max_length_none_returns_zero():
+    tools, stripped = strip_oversized_max_length(None)
+    assert tools is None
+    assert stripped == 0
+
+
+def test_strip_oversized_max_length_bool_maxlength_ignored():
+    """bool is an int subclass in Python -- must not be misidentified as a
+    numeric maxLength (defensive; not a shape any real provider emits)."""
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {"body": {"type": "string", "maxLength": True}},
+            },
+        },
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 0
+
+
+def test_strip_oversized_max_length_anyof_variant_same_depth_as_parent():
+    """anyOf/oneOf/allOf variants sit at the SAME depth as their parent, not
+    a nesting step -- a top-level property using anyOf is still depth 0 and
+    must be preserved even at magnitude>=2000.
+
+    Design choice, not independently confirmed against the live backend
+    (the 9 empirically-tested HTTP shapes did not include a top-level anyOf
+    case) -- pinned here so any future change to this behavior is deliberate."""
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "value": {
+                "anyOf": [
+                    {"type": "string", "maxLength": 4000},
+                    {"type": "integer"},
+                ],
+            },
+        },
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 0
+
+
+def test_strip_oversized_max_length_anyof_nested_one_level_in_stripped():
+    """An anyOf variant that is itself nested one level inside another
+    object (combined depth reaches 2) is still stripped -- the anyOf branch
+    does not reset the depth counter. Same untested-extrapolation caveat as
+    the sibling test above."""
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "data": {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "anyOf": [
+                            {"type": "string", "maxLength": 4000},
+                            {"type": "integer"},
+                        ],
+                    },
+                },
+            },
+        },
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 1
+
+
+def test_strip_oversized_max_length_additional_properties_counts_as_nesting():
+    """additionalProperties schema is treated as a nesting step (depth+1).
+
+    Design choice, not independently confirmed against the live backend --
+    pinned here so any future change to this behavior is deliberate."""
+    tools = [_tool("t", {
+        "type": "object",
+        "properties": {
+            "dict_field": {
+                "type": "object",
+                "additionalProperties": {"type": "string", "maxLength": 4000},
+            },
+        },
+    })]
+    _, stripped = strip_oversized_max_length(tools)
+    assert stripped == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────

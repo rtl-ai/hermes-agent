@@ -771,16 +771,26 @@ def classify_api_error(
 
     # llama.cpp's ``json-schema-to-grammar`` converter (used by its OAI
     # server to build GBNF tool-call parsers) rejects regex escape classes
-    # like ``\d``/``\w``/``\s`` and most ``format`` values. MCP servers
-    # routinely emit ``"pattern": "\\d{4}-\\d{2}-\\d{2}"`` for date/phone/
-    # email params. llama.cpp surfaces this as HTTP 400 with one of a few
-    # recognizable phrases; on match we strip ``pattern``/``format`` from
-    # ``self.tools`` in the retry loop and retry once. Cloud providers are
-    # unaffected — they accept these keywords and we never hit this branch.
+    # like ``\d``/``\w``/``\s``, most ``format`` values, and oversized
+    # nested ``maxLength`` (>= ~2000, ggml-org/llama.cpp#25746/#25923). MCP
+    # servers routinely emit these shapes. llama.cpp surfaces this as HTTP
+    # 400 with one of a few recognizable phrases; on match we strip the
+    # offending keywords from ``self.tools`` in the retry loop and retry
+    # once. Cloud providers are unaffected — they accept these keywords and
+    # we never hit this branch.
+    #
+    # "failed to parse grammar" (wrapped as "Failed to initialize
+    # samplers: failed to parse grammar") is the phrase current llama.cpp
+    # builds actually return (confirmed live against qwen36-27b-heretic-
+    # uncensored-q5km, b10121, 2026-07-29) — the original "error parsing
+    # grammar" phrasing below no longer appears verbatim, so real incidents
+    # were falling through to the generic retry path and exhausting
+    # max_retries against a guaranteed-identical 400 every time.
     if (
         status_code == 400
         and (
             "error parsing grammar" in error_msg
+            or "failed to parse grammar" in error_msg
             or "json-schema-to-grammar" in error_msg
             or (
                 "unable to generate parser" in error_msg

@@ -526,6 +526,128 @@ def strip_pattern_and_format(tools: list[dict]) -> tuple[list[dict], int]:
     return tools, stripped
 
 
+_MAX_LENGTH_SAFE_LIMIT = 2000
+
+
+def strip_oversized_max_length(
+    tools: list[dict], limit: int = _MAX_LENGTH_SAFE_LIMIT
+) -> tuple[list[dict], int]:
+    """Strip ``maxLength`` values at/above ``limit`` from *nested* schema nodes.
+
+    Reactive sanitizer, invoked only when llama.cpp's grammar compiler has
+    rejected a tool schema. llama.cpp's ``json-schema-to-grammar`` compiler
+    expands ``maxLength`` into a bounded-repetition GBNF rule; values at or
+    above its hard-coded repetition cap (~2000) produce an unparseable rule
+    when that rule is embedded inside another rule, and the *whole*
+    tool-call grammar is rejected — not just the offending tool. See
+    ggml-org/llama.cpp#25746, #25923 (both open as of 2026-07-25; fix
+    candidate PR #25927 unmerged).
+
+    Only *nested* occurrences are stripped — depth >= 2, i.e. inside a
+    nested object's ``properties``, inside array ``items``, etc., but not a
+    tool's own top-level property. Live testing against qwen36-27b-heretic-
+    uncensored-q5km (llama.cpp b10121, 2026-07-29) across 9 schema shapes
+    confirmed the failure needs BOTH conditions together: a top-level
+    ``maxLength`` never fails regardless of magnitude (tested up to 50000,
+    and four stacked top-level fields at 4000 each), and a nested
+    ``maxLength`` below ``limit`` never fails (tested down to 1). Stripping
+    top-level occurrences too would needlessly weaken real input validation
+    on fields that were never actually at risk.
+
+    The walk only descends through recognized schema-structural keywords
+    (``properties``, ``items``, ``additionalProperties``; ``anyOf``/
+    ``oneOf``/``allOf`` at the same depth, since a combinator is an
+    alternative for the same position, not a step deeper) rather than
+    blindly recursing into every dict value — so a ``default``/``examples``
+    value that happens to contain a key literally named ``maxLength`` is
+    never mistaken for a schema node.
+
+    Cloud providers accept large ``maxLength`` values fine and rely on them
+    as prompting hints, so — matching ``strip_pattern_and_format`` — we keep
+    the keyword in the default schema and only strip on demand.
+
+    Args:
+        tools: OpenAI-format tool list, mutated in place for efficiency.
+            Callers that need to preserve the original should deep-copy first.
+        limit: values >= this are stripped, but only when nested (depth >= 2
+            relative to the tool's root parameters schema). Default mirrors
+            llama.cpp's current (as of 2026-07) hard-coded repetition-count
+            ceiling, which is not yet configurable upstream (PR #21003,
+            unmerged).
+
+    Returns:
+        ``(tools, stripped_count)`` — the same list reference plus a count of
+        how many ``maxLength`` keywords were removed across all tools.
+    """
+    if not tools:
+        return tools, 0
+
+    stripped = 0
+
+    def _walk(schema: Any, depth: int) -> None:
+        nonlocal stripped
+        if not isinstance(schema, dict):
+            return
+
+        max_len = schema.get("maxLength")
+        if (
+            depth >= 2
+            and isinstance(max_len, (int, float))
+            and not isinstance(max_len, bool)
+            and max_len >= limit
+        ):
+            schema.pop("maxLength", None)
+            stripped += 1
+
+        props = schema.get("properties")
+        if isinstance(props, dict):
+            for sub_schema in props.values():
+                _walk(sub_schema, depth + 1)
+
+        items = schema.get("items")
+        if isinstance(items, dict):
+            _walk(items, depth + 1)
+        elif isinstance(items, list):
+            for sub_schema in items:
+                _walk(sub_schema, depth + 1)
+
+        add_props = schema.get("additionalProperties")
+        if isinstance(add_props, dict):
+            _walk(add_props, depth + 1)
+
+        for combinator in ("anyOf", "oneOf", "allOf"):
+            variants = schema.get(combinator)
+            if isinstance(variants, list):
+                for sub_schema in variants:
+                    _walk(sub_schema, depth)
+
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+
+        # OpenAI-format: {"function": {"parameters": {...}}}
+        fn = tool.get("function")
+        if isinstance(fn, dict):
+            params = fn.get("parameters")
+            if isinstance(params, dict):
+                _walk(params, 0)
+                continue
+
+        # Responses-format: {"name": "...", "parameters": {...}}
+        params = tool.get("parameters")
+        if isinstance(params, dict):
+            _walk(params, 0)
+            continue
+
+    if stripped:
+        logger.info(
+            "schema_sanitizer: stripped %d oversized nested maxLength keyword(s) "
+            "(>= %d) from tool schemas (llama.cpp grammar-parse recovery)",
+            stripped, limit,
+        )
+    return tools, stripped
+
+
 def strip_slash_enum(tools: list[dict]) -> tuple[list[dict], int]:
     """Strip ``enum`` keywords whose string values contain a forward slash.
 

@@ -742,6 +742,24 @@ class TestClassifyApiError:
         assert result.retryable is False
         assert result.should_compress is False
 
+    def test_llama_cpp_failed_to_parse_grammar_phrase(self):
+        e = MockAPIError(
+            "Failed to initialize samplers: failed to parse grammar",
+            status_code=400,
+        )
+        result = classify_api_error(e, provider="openai-compatible")
+        assert result.reason == FailoverReason.llama_cpp_grammar_pattern
+        assert result.retryable is True
+        assert result.should_compress is False
+
+    def test_llama_cpp_failed_to_parse_grammar_requires_400(self):
+        e = MockAPIError(
+            "Failed to initialize samplers: failed to parse grammar",
+            status_code=500,
+        )
+        result = classify_api_error(e, provider="openai-compatible")
+        assert result.reason != FailoverReason.llama_cpp_grammar_pattern
+
     # ── Provider-specific: Anthropic long-context tier ──
 
     def test_anthropic_long_context_tier(self):

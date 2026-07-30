@@ -12517,10 +12517,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _final_text = str(_agent_result.get("final_response") or "")
                 elif isinstance(_agent_result, str):
                     _final_text = _agent_result
-                # Skip for empty responses (interrupted / errored) — the
-                # judge would almost always say "continue" and we'd loop
-                # on error. Let the user drive the next turn.
-                if _final_text.strip():
+                _goal_continuation_allowed = bool(
+                    getattr(event, "_goal_continuation_allowed", True)
+                )
+                # Skip empty, interrupted, partial, or errored turns. The inner
+                # handler normalizes technical failures into non-empty warning
+                # text for delivery, so text alone cannot prove the agent turn
+                # completed. Running the judge on that warning would almost
+                # always say "continue" and loop on the same transport failure.
+                if _final_text.strip() and _goal_continuation_allowed:
                     try:
                         session_entry = await self.async_session_store.get_or_create_session(source)
                     except Exception:
@@ -12531,6 +12536,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             source=source,
                             final_response=_final_text,
                         )
+                elif _final_text.strip():
+                    logger.info(
+                        "Skipping goal continuation after incomplete agent turn "
+                        "for session %s",
+                        _quick_key,
+                    )
             except Exception as _goal_exc:
                 logger.debug("goal continuation hook failed: %s", _goal_exc)
             return _agent_result
@@ -14226,6 +14237,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 moa_config=getattr(event, "_moa_config", None),
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+            )
+            # The public handler returns only the normalized response string,
+            # which loses the structured completion/error flags the /goal hook
+            # needs. Carry the eligibility bit on this per-turn event so the
+            # outer handler can distinguish a real final answer from a warning
+            # synthesized for a partial or failed run.
+            setattr(
+                event,
+                "_goal_continuation_allowed",
+                _should_clear_resume_pending_after_turn(agent_result),
             )
 
             # Stop persistent typing indicator now that the agent is done.

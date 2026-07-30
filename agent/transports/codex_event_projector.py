@@ -122,7 +122,16 @@ class CodexEventProjector:
         if self._pending_reasoning:
             msg["reasoning"] = "\n".join(self._pending_reasoning)
             self._pending_reasoning = []
-        return ProjectionResult(messages=[msg], final_text=text)
+        phase = str(item.get("phase") or "").strip().lower()
+        # Codex emits completed agentMessage items for both interim commentary
+        # and the final answer. Keep every message in the transcript, but only
+        # terminal phases may satisfy run_turn's missing-turn/completed recovery.
+        # Older providers omit phase, so preserve the legacy terminal fallback.
+        is_terminal = not phase or phase in {"final_answer", "final"}
+        return ProjectionResult(
+            messages=[msg],
+            final_text=text if is_terminal else None,
+        )
 
     def _project_user_message(self, item: dict) -> ProjectionResult:
         # codex's userMessage content is a list of UserInput variants. For

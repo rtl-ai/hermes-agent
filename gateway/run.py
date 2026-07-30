@@ -21325,6 +21325,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 message_type=event.message_type,
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
+            # The public handler returns only the normalized response string,
+            # which loses the structured completion/error flags the /goal hook
+            # needs. Carry the eligibility bit on this per-turn event so the
+            # outer handler can distinguish a real final answer from a warning
+            # synthesized for a partial or failed run.
+            setattr(
+                event,
+                "_goal_continuation_allowed",
+                _should_clear_resume_pending_after_turn(agent_result),
+            )
 
             # Stop persistent typing indicator now that the agent is done.
             # Slack AI status is scoped to a thread/workspace, so preserve the
@@ -22738,9 +22748,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.debug("post-turn session resolution failed: %s", exc)
             return
 
-        # Empty interrupted/errored responses must not drive /goal, but an
+        # Empty, interrupted, partial, or errored responses must not drive
+        # /goal. The inner handler normalizes some failures into non-empty
+        # warning text, so text alone cannot prove the turn completed. An
         # in-flight /loop tick still needs to be released and rescheduled.
-        if final_text.strip():
+        goal_continuation_allowed = bool(
+            getattr(event, "_goal_continuation_allowed", True)
+        )
+        if final_text.strip() and goal_continuation_allowed:
             try:
                 await self._post_turn_goal_continuation(
                     session_entry=session_entry,
@@ -22749,6 +22764,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
             except Exception as exc:
                 logger.debug("goal continuation hook failed: %s", exc)
+        elif final_text.strip():
+            logger.info("Skipping goal continuation after incomplete agent turn")
         try:
             await self._post_turn_loop_completion(
                 session_entry=session_entry,

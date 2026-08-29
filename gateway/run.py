@@ -21443,6 +21443,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     agent_result, response, history_len=len(history),
                 )
                 response = _sanitize_gateway_final_response(source.platform, response)
+                _active_mdl = agent_result.get("model") or ""
+                if response and _active_mdl and not response.rstrip().endswith(f"_[Model: {_active_mdl}]_"):
+                    response = f"{response.rstrip()}\n\n_[Model: {_active_mdl}]_"
 
             # Ordering contract: the agent thread already updated the contextvar
             # in conversation_compression.py; propagate to SessionEntry + _save().

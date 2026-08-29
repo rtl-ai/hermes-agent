@@ -262,6 +262,107 @@ class TestCrossPlatformDelivery:
         # don't strand the final response (TTL-based cleanup happens on POST).
         assert chat_id in adapter._delivery_info
 
+    @pytest.mark.asyncio
+    async def test_cross_platform_image_delivery_preserves_thread(self):
+        routes = {
+            "alerts": {
+                "secret": _INSECURE_NO_AUTH,
+                "prompt": "Alert: {message}",
+                "deliver": "slack",
+                "deliver_extra": {
+                    "chat_id": "D0123456789",
+                    "thread_id": "1786447391.027779",
+                },
+            }
+        }
+        adapter = _make_adapter(routes)
+        adapter.handle_message = AsyncMock()
+
+        mock_slack_adapter = AsyncMock()
+        mock_slack_adapter.send_image_file = AsyncMock(
+            return_value=SendResult(success=True, message_id="1786447392.000001")
+        )
+        mock_runner = MagicMock()
+        mock_runner.adapters = {Platform.SLACK: mock_slack_adapter}
+        mock_runner.config = GatewayConfig(
+            platforms={Platform.SLACK: PlatformConfig(enabled=True, token="fake")}
+        )
+        adapter.gateway_runner = mock_runner
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/alerts",
+                json={"message": "Monthly evidence is ready"},
+                headers={"X-GitHub-Delivery": "alert-image-001"},
+            )
+            assert resp.status == 202
+
+        chat_id = "webhook:alerts:alert-image-001"
+        result = await adapter.send_image_file(
+            chat_id,
+            "/tmp/evidence-redacted.png",
+            caption="redacted evidence",
+        )
+
+        assert result.success is True
+        assert result.message_id == "1786447392.000001"
+        mock_slack_adapter.send_image_file.assert_awaited_once_with(
+            chat_id="D0123456789",
+            image_path="/tmp/evidence-redacted.png",
+            caption="redacted evidence",
+            reply_to=None,
+            metadata={"thread_id": "1786447391.027779"},
+        )
+        assert chat_id in adapter._delivery_info
+
+
+class TestGitLabDeliveryId:
+
+    @pytest.mark.asyncio
+    async def test_gitlab_event_uuid_takes_precedence_for_idempotency(self):
+        routes = {
+            "gitlab-pipelines": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["Pipeline Hook"],
+                "prompt": "Pipeline {object_attributes.id}",
+            }
+        }
+        adapter = _make_adapter(routes)
+        adapter.handle_message = AsyncMock()
+        payload = {
+            "object_kind": "pipeline",
+            "object_attributes": {"id": 2759942832},
+        }
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/webhooks/gitlab-pipelines",
+                json=payload,
+                headers={
+                    "X-GitLab-Event": "Pipeline Hook",
+                    "X-Gitlab-Event-UUID": "gitlab-event-001",
+                    "X-Request-ID": "request-attempt-1",
+                },
+            )
+            second = await cli.post(
+                "/webhooks/gitlab-pipelines",
+                json=payload,
+                headers={
+                    "X-GitLab-Event": "Pipeline Hook",
+                    "X-Gitlab-Event-UUID": "gitlab-event-001",
+                    "X-Request-ID": "request-attempt-2",
+                },
+            )
+
+            assert first.status == 202
+            assert second.status == 200
+            assert (await second.json())["status"] == "duplicate"
+
+        await asyncio.sleep(0.05)
+        adapter.handle_message.assert_awaited_once()
+
 
 # ===================================================================
 # Test 4: GitHub comment delivery via gh CLI

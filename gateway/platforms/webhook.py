@@ -842,13 +842,14 @@ class WebhookAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[webhook] Skill loading failed: %s", e)
 
-        # Build a unique delivery ID
-        delivery_id = request.headers.get(
-            "X-GitHub-Delivery",
-            request.headers.get(
-                "svix-id",
-                request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
-            ),
+        # Build a unique delivery ID. Provider-native immutable event IDs must
+        # win over generic request IDs, which can change across retry attempts.
+        delivery_id = (
+            request.headers.get("X-GitHub-Delivery")
+            or request.headers.get("X-Gitlab-Event-UUID")
+            or request.headers.get("svix-id")
+            or request.headers.get("X-Request-ID")
+            or str(int(time.time() * 1000))
         )
 
         # ── Idempotency ─────────────────────────────────────────
@@ -1426,58 +1427,116 @@ class WebhookAdapter(BasePlatformAdapter):
             logger.error("[webhook] github_comment delivery error: %s", e)
             return SendResult(success=False, error=str(e))
 
-    async def _deliver_cross_platform(
-        self, platform_name: str, content: str, delivery: dict
-    ) -> SendResult:
-        """Route response to another platform (telegram, discord, etc.)."""
+    def _resolve_cross_platform_target(
+        self, platform_name: str, delivery: dict
+    ) -> tuple[Any, str, Optional[dict], Optional[SendResult]]:
+        """Resolve one configured cross-platform target and its thread metadata."""
         if not self.gateway_runner:
-            return SendResult(
-                success=False,
-                error="No gateway runner for cross-platform delivery",
+            return (
+                None,
+                "",
+                None,
+                SendResult(
+                    success=False,
+                    error="No gateway runner for cross-platform delivery",
+                ),
             )
 
         try:
             target_platform = Platform(platform_name)
         except ValueError:
-            return SendResult(
-                success=False, error=f"Unknown platform: {platform_name}"
+            return (
+                None,
+                "",
+                None,
+                SendResult(success=False, error=f"Unknown platform: {platform_name}"),
             )
 
         # Default adapters first; multiplex may park Slack/etc. only on a
-        # secondary profile (self._profile_adapters). Fall back so webhook
-        # deliver:slack still works when default has slack disabled.
+        # secondary profile. Fall back so webhook deliver:slack still works
+        # when the default profile has Slack disabled.
         adapter = self.gateway_runner.adapters.get(target_platform)
         if not adapter:
-            for _prof, amap in (getattr(self.gateway_runner, "_profile_adapters", None) or {}).items():
+            for _prof, amap in (
+                getattr(self.gateway_runner, "_profile_adapters", None) or {}
+            ).items():
                 if not isinstance(amap, dict):
                     continue
-                cand = amap.get(target_platform)
-                if cand is not None:
-                    adapter = cand
+                candidate = amap.get(target_platform)
+                if candidate is not None:
+                    adapter = candidate
                     break
         if not adapter:
-            return SendResult(
-                success=False,
-                error=f"Platform {platform_name} not connected",
+            return (
+                None,
+                "",
+                None,
+                SendResult(
+                    success=False,
+                    error=f"Platform {platform_name} not connected",
+                ),
             )
 
-        # Use home channel if no specific chat_id in deliver_extra
         extra = delivery.get("deliver_extra", {})
-        chat_id = extra.get("chat_id", "")
-        if not chat_id:
+        target_chat_id = extra.get("chat_id", "")
+        if not target_chat_id:
             home = self.gateway_runner.config.get_home_channel(target_platform)
             if home:
-                chat_id = home.chat_id
+                target_chat_id = home.chat_id
             else:
-                return SendResult(
-                    success=False,
-                    error=f"No chat_id or home channel for {platform_name}",
+                return (
+                    None,
+                    "",
+                    None,
+                    SendResult(
+                        success=False,
+                        error=f"No chat_id or home channel for {platform_name}",
+                    ),
                 )
 
-        # Pass thread_id from deliver_extra so Telegram forum topics work
         metadata = None
         thread_id = extra.get("message_thread_id") or extra.get("thread_id")
         if thread_id:
             metadata = {"thread_id": thread_id}
+        return adapter, str(target_chat_id), metadata, None
 
+    async def _deliver_cross_platform(
+        self, platform_name: str, content: str, delivery: dict
+    ) -> SendResult:
+        """Route a text response to another connected platform."""
+        adapter, chat_id, metadata, error = self._resolve_cross_platform_target(
+            platform_name, delivery
+        )
+        if error is not None:
+            return error
         return await adapter.send(chat_id, content, metadata=metadata)
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Forward a webhook agent's local image to its configured target."""
+        delivery = self._delivery_info.get(chat_id, {})
+        deliver_type = delivery.get("deliver", "log")
+        adapter, target_chat_id, target_metadata, error = (
+            self._resolve_cross_platform_target(deliver_type, delivery)
+        )
+        if error is not None:
+            return error
+        if not hasattr(adapter, "send_image_file"):
+            return SendResult(
+                success=False,
+                error=f"Platform {deliver_type} cannot deliver image files",
+            )
+        return await adapter.send_image_file(
+            chat_id=target_chat_id,
+            image_path=image_path,
+            caption=caption,
+            reply_to=reply_to,
+            metadata=target_metadata,
+        )

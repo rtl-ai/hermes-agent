@@ -424,6 +424,57 @@ def strip_pattern_and_format(tools: list[dict]) -> tuple[list[dict], int]:
         "tool schemas (llama.cpp grammar-parse recovery)")
 
 
+def strip_oversized_max_length(
+    tools: list[dict], limit: int = 2000
+) -> tuple[list[dict], int]:
+    """Reactively drop oversized nested maxLength constraints after a llama.cpp grammar error.
+
+    Direct tool parameters (depth 1) are preserved. Only schema children
+    nested beneath them (depth >= 2) are affected, avoiding unnecessary
+    loss of validation constraints on common flat parameter shapes.
+    Do not traverse literal defaults/examples as if they were schemas.
+    """
+    stripped = 0
+
+    def walk(schema: Any, depth: int) -> None:
+        nonlocal stripped
+        if not isinstance(schema, dict):
+            return
+        value = schema.get("maxLength")
+        if (depth >= 2 and isinstance(value, (int, float))
+                and not isinstance(value, bool) and value >= limit):
+            del schema["maxLength"]
+            stripped += 1
+        for name in ("properties", "$defs", "definitions", "patternProperties"):
+            children = schema.get(name)
+            if isinstance(children, dict):
+                for child in children.values():
+                    walk(child, depth + 1)
+        for name in ("items", "additionalProperties", "contains", "not", "if", "then", "else"):
+            child = schema.get(name)
+            if isinstance(child, dict):
+                walk(child, depth + 1)
+            elif isinstance(child, list):
+                for sub in child:
+                    walk(sub, depth + 1)
+        for name in ("allOf", "anyOf", "oneOf"):
+            children = schema.get(name)
+            if isinstance(children, list):
+                for child in children:
+                    walk(child, depth)
+
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function")
+        root = fn.get("parameters") if isinstance(fn, dict) else tool.get("parameters")
+        if isinstance(root, dict):
+            walk(root, 0)
+    if stripped:
+        logger.info("schema_sanitizer: stripped %s oversized nested maxLength constraints", stripped)
+    return tools, stripped
+
+
 def strip_slash_enum(tools: list[dict]) -> tuple[list[dict], int]:
     """Strip ``enum`` keywords whose string values contain ``/``, in place: xAI's grammar compiler
     rejects them (HTTP 400 before any token) — typically MCP enums of HuggingFace model IDs."""

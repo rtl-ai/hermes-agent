@@ -376,6 +376,15 @@ class GatewayGoalsMixin:
         # folder is gone) is no evidence either (the TUI's hook skips it the same way): the tick is
         # released with no text, so a --until judge never grades it.
         failed = self._turn_failed()
+        # A partially completed or interrupted turn can still carry non-empty
+        # text. That text must not tell the goal judge that an interrupted
+        # operation succeeded, even if the owner capture missed the failure.
+        if isinstance(agent_result, dict):
+            failed = failed or bool(
+                agent_result.get("failed") or agent_result.get("partial")
+                or agent_result.get("interrupted") or agent_result.get("error")
+                or agent_result.get("completed") is False
+            )
         hooks = [("loop completion", self._post_turn_loop_completion)]
         if final_text.strip() and not failed:
             hooks.insert(0, ("goal continuation", self._post_turn_goal_continuation))

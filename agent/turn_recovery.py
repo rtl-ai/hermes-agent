@@ -522,27 +522,29 @@ def _recover_format_errors(
             )
             return True
 
-    # llama.cpp ``json-schema-to-grammar`` rejects regex escapes and most ``format``
-    # values: strip ``pattern``/``format`` from ``agent.tools``, retry once.
+    # llama.cpp can reject nested oversized maxLength as well as pattern/format.
+    # Preserve cloud schema detail: reactive recovery only on the classified 400.
     if classified.reason == FailoverReason.llama_cpp_grammar_pattern and not _retry.llama_cpp_grammar_retry_attempted:
         _retry.llama_cpp_grammar_retry_attempted = True
         try:
-            from tools.schema_sanitizer import strip_pattern_and_format
-            _, _stripped = strip_pattern_and_format(agent.tools)
+            from tools.schema_sanitizer import strip_oversized_max_length, strip_pattern_and_format
+            _, _stripped_pf = strip_pattern_and_format(agent.tools)
+            _, _stripped_ml = strip_oversized_max_length(agent.tools)
         except Exception as _strip_exc:  # pragma: no cover — defensive
             logger.warning("%sllama.cpp grammar recovery: strip helper failed: %s", agent.log_prefix, _strip_exc)
-            _stripped = 0
-        if _stripped:
-            _vlines(agent, f"⚠️  llama.cpp rejected tool schema grammar — stripped {_stripped} pattern/format keyword(s), retrying...")
+            _stripped_pf = 0
+            _stripped_ml = 0
+        if _stripped_pf + _stripped_ml:
+            _vlines(agent, f"⚠️  llama.cpp rejected tool schema grammar — stripped {_stripped_pf} pattern/format and {_stripped_ml} oversized maxLength keyword(s), retrying...")
             logger.warning(
-                "%sllama.cpp grammar recovery: stripped %d "
-                "pattern/format keyword(s) from tool schemas",
-                agent.log_prefix, _stripped,
+                "%sllama.cpp grammar recovery: stripped %d pattern/format and "
+                "%d oversized maxLength keyword(s) from tool schemas",
+                agent.log_prefix, _stripped_pf, _stripped_ml,
             )
             return True
         # Nothing to strip — fall through to normal retry rather than loop on the same error.
         logger.warning(
-            "%sllama.cpp grammar error but no pattern/format "
+            "%sllama.cpp grammar error but no pattern/format/maxLength "
             "keywords to strip — falling through to normal retry",
             agent.log_prefix,
         )

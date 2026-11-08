@@ -75,9 +75,10 @@ _GH_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 
 
 def _header_delivery_id(headers) -> str:
-    """The provider's delivery id (GitHub, Svix, Standard Webhooks, generic), else a fresh one."""
-    return headers.get("X-GitHub-Delivery", headers.get("svix-id", headers.get(
-        "webhook-id", headers.get("X-Request-ID", uuid.uuid4().hex))))
+    """Prefer provider-native immutable IDs (GitHub, GitLab, Svix), then a unique fallback."""
+    return (headers.get("X-GitHub-Delivery") or headers.get("X-Gitlab-Event-UUID")
+            or headers.get("svix-id") or headers.get("webhook-id")
+            or headers.get("X-Request-ID") or uuid.uuid4().hex)
 
 
 @dataclass(frozen=True)

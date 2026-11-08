@@ -203,3 +203,44 @@ class TestCrossPlatformDelivery:
         # Delivery info is retained after send() so interim status messages
         # don't strand the final response (TTL-based cleanup happens on POST).
         assert chat_id in adapter._delivery_info
+
+
+def test_gitlab_delivery_uuid_has_priority_over_generic_request_id():
+    from gateway.platforms.webhook import _header_delivery_id
+
+    assert _header_delivery_id({
+        "X-Gitlab-Event-UUID": "gitlab-fixed-event",
+        "X-Request-ID": "request-varies-on-retry",
+    }) == "gitlab-fixed-event"
+
+
+@pytest.mark.asyncio
+async def test_image_delivery_respects_profile_authorization(monkeypatch):
+    """Media must use the same per-profile authorization boundary as text."""
+    from gateway.platforms import webhook_delivery
+
+    adapter = _make_adapter({"media": {"secret": "test-secret", "deliver": "slack"}})
+    delivery = {
+        "deliver": "slack",
+        "profile": None,
+        "deliver_extra": {"chat_id": "C123", "thread_id": "thread-123"},
+    }
+    monkeypatch.setattr(webhook_delivery, "retained_destination", lambda _adapter, _id: delivery)
+    target = MagicMock()
+    target.send_image_file = AsyncMock(return_value=SendResult(success=True))
+    gateway = MagicMock()
+    gateway._authorization_adapter.return_value = target
+    adapter.gateway_runner = gateway
+
+    result = await adapter.send_image_file("opaque", "/tmp/illustration.png", caption="illustration")
+    assert result.success is True
+    gateway._authorization_adapter.assert_called_once_with(Platform.SLACK, None)
+    target.send_image_file.assert_awaited_once_with(
+        chat_id="C123", image_path="/tmp/illustration.png", caption="illustration",
+        reply_to=None, metadata={"thread_id": "thread-123"},
+    )
+
+    gateway._authorization_adapter.return_value = None
+    denied = await adapter.send_image_file("opaque", "/tmp/illustration.png", caption="blocked")
+    assert denied.success is False
+    assert target.send_image_file.await_count == 1

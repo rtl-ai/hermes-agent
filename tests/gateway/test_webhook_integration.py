@@ -203,3 +203,48 @@ class TestCrossPlatformDelivery:
         # Delivery info is retained after send() so interim status messages
         # don't strand the final response (TTL-based cleanup happens on POST).
         assert chat_id in adapter._delivery_info
+
+
+@pytest.mark.asyncio
+async def test_profile_authorized_webhook_image_delivery_port(monkeypatch):
+    """Preserve outbound webhook media without weakening profile-scoped auth."""
+    from gateway.platforms import webhook_delivery
+    adapter = _make_adapter({"media": {"secret": "test-secret", "deliver": "slack"}})
+    destination = {
+        "deliver": "slack",
+        "profile": None,
+        "deliver_extra": {"chat_id": "C123", "thread_id": "thread-123"},
+    }
+    monkeypatch.setattr(webhook_delivery, "retained_destination", lambda *_: destination)
+    slack = MagicMock()
+    slack.send_image_file = AsyncMock(return_value=SendResult(success=True))
+    gateway = MagicMock()
+    gateway._authorization_adapter.return_value = slack
+    adapter.gateway_runner = gateway
+
+    allowed = await adapter.send_image_file("opaque-id", "/tmp/image.png", caption="Here")
+    assert allowed.success is True
+    gateway._authorization_adapter.assert_called_once_with(Platform.SLACK, None)
+    slack.send_image_file.assert_awaited_once_with(
+        chat_id="C123", image_path="/tmp/image.png", caption="Here",
+        reply_to=None, metadata={"thread_id": "thread-123"},
+    )
+
+    gateway._authorization_adapter.return_value = None
+    blocked = await adapter.send_image_file("opaque-id", "/tmp/image.png", caption="No")
+    assert blocked.success is False
+    assert slack.send_image_file.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_webhook_image_requires_retained_destination_port(monkeypatch):
+    """An unknown or expired webhook route must not disclose image data."""
+    from gateway.platforms import webhook_delivery
+    adapter = _make_adapter({"media": {"secret": "test-secret", "deliver": "slack"}})
+    monkeypatch.setattr(webhook_delivery, "retained_destination",
+                        lambda *_: (_ for _ in ()).throw(ValueError("unavailable")))
+    gateway = MagicMock()
+    adapter.gateway_runner = gateway
+    denied = await adapter.send_image_file("unknown-id", "/tmp/image.png", caption="No")
+    assert denied.success is False
+    gateway._authorization_adapter.assert_not_called()

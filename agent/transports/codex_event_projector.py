@@ -75,7 +75,10 @@ class CodexEventProjector:
 
     def _project_agent_message(self, item: dict) -> ProjectionResult:
         text = item.get("text") or ""
-        return ProjectionResult(messages=[self._assistant_message(text)], final_text=text)
+        phase = str(item.get("phase") or "").strip().lower()
+        # An interim Codex commentary message belongs in history, not in the terminal-answer slot.
+        terminal = not phase or phase in {"final_answer", "final"}
+        return ProjectionResult(messages=[self._assistant_message(text)], final_text=text if terminal else None)
 
     @staticmethod
     def _project_user_message(item: dict) -> ProjectionResult:

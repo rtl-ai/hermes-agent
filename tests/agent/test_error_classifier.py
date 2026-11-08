@@ -2159,3 +2159,15 @@ class TestStreamingRenderFormatError:
         e = MockAPIError("Error rendering prompt with jinja template: ...", status_code=500)
         result = classify_api_error(e, provider="lm-studio", model="x")
         assert result.reason != FailoverReason.format_error
+
+
+@pytest.mark.parametrize("message", [
+    "Failed to initialize samplers: failed to parse grammar",
+    "failed to parse grammar",
+])
+def test_llama_cpp_current_failed_to_parse_grammar_message(message):
+    """Newer llama.cpp grammar errors still take the schema-recovery path."""
+    err = MockAPIError(message, status_code=400)
+    result = classify_api_error(err, provider="custom", model="local-llama")
+    assert result.reason == FailoverReason.llama_cpp_grammar_pattern
+    assert result.retryable is True

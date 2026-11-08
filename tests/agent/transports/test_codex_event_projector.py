@@ -339,3 +339,21 @@ class TestRoleAlternationInvariant:
         assert msgs[0]["role"] == "assistant"
         assert msgs[1]["role"] == "tool"
         assert msgs[1]["tool_call_id"] == msgs[0]["tool_calls"][0]["id"]
+
+
+@pytest.mark.parametrize(("phase", "is_terminal"), [
+    ("commentary", False),
+    ("analysis", False),
+    ("final_answer", True),
+    ("final", True),
+    ("", True),  # Backward-compatible providers without phase.
+])
+def test_interim_agent_message_is_not_a_final_turn(phase, is_terminal):
+    """A completed interim message is transcript material, not turn completion."""
+    result = CodexEventProjector().project({
+        "method": "item/completed",
+        "params": {"item": {"type": "agentMessage", "id": "msg-1",
+                             "phase": phase, "text": "Working on it"}},
+    })
+    assert result.messages == [{"role": "assistant", "content": "Working on it"}]
+    assert result.final_text == ("Working on it" if is_terminal else None)

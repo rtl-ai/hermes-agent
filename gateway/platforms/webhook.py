@@ -75,9 +75,10 @@ _GH_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 
 
 def _header_delivery_id(headers) -> str:
-    """The provider's delivery id (GitHub, Svix, Standard Webhooks, generic), else a fresh one."""
-    return headers.get("X-GitHub-Delivery", headers.get("svix-id", headers.get(
-        "webhook-id", headers.get("X-Request-ID", uuid.uuid4().hex))))
+    """Prefer provider-native immutable IDs (GitHub, GitLab, Svix), then a unique fallback."""
+    return (headers.get("X-GitHub-Delivery") or headers.get("X-Gitlab-Event-UUID")
+            or headers.get("svix-id") or headers.get("webhook-id")
+            or headers.get("X-Request-ID") or uuid.uuid4().hex)
 
 
 @dataclass(frozen=True)
@@ -331,6 +332,55 @@ class WebhookAdapter(BasePlatformAdapter):
             logger.warning("[webhook] Destination unavailable for %s", chat_id, exc_info=True)
             return SendResult(success=False, error="Webhook destination unavailable or unauthorized")
         return await self._deliver_to(delivery, chat_id, content)
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Forward media through the route owner's authorized platform adapter.
+
+        Do not borrow an unrelated profile's bot or credentials. The same
+        retained destination and profile authorization checks used for text
+        also protect image uploads.
+        """
+        from gateway.platforms.webhook_delivery import retained_destination
+        try:
+            delivery = retained_destination(self, chat_id)
+        except Exception:
+            logger.warning("[webhook] Media destination unavailable for %s", chat_id, exc_info=True)
+            return SendResult(success=False, error="Webhook destination unavailable or unauthorized")
+        if not self.gateway_runner:
+            return SendResult(success=False, error="No gateway runner for cross-platform delivery")
+        platform_name = delivery.get("deliver", "")
+        try:
+            target_platform = Platform(platform_name)
+        except ValueError:
+            return SendResult(success=False, error=f"Unknown platform: {platform_name}")
+        profile = delivery.get("profile")
+        adapter = self._find_adapter(target_platform, profile)
+        if not adapter:
+            return SendResult(success=False, error=f"Platform {platform_name} not connected")
+        sender = getattr(adapter, "send_image_file", None)
+        if not callable(sender):
+            return SendResult(success=False, error=f"Platform {platform_name} cannot deliver image files")
+        extra = delivery.get("deliver_extra") or {}
+        with self._profile_scope(profile):
+            destination = extra.get("chat_id")
+            if not destination:
+                home = self._delivery_config(profile).get_home_channel(target_platform)
+                if home is None:
+                    return SendResult(success=False, error=f"No chat_id or home channel for {platform_name}")
+                destination = home.chat_id
+            thread_id = extra.get("message_thread_id") or extra.get("thread_id")
+            return await sender(
+                chat_id=str(destination), image_path=image_path, caption=caption,
+                reply_to=reply_to, metadata={"thread_id": thread_id} if thread_id else None,
+            )
 
     async def _deliver_to(self, delivery: dict[str, Any], chat_id: str, content: str) -> SendResult:
         deliver_type = delivery["deliver"]

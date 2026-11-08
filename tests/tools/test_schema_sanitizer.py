@@ -11,6 +11,7 @@ import copy
 
 from tools.schema_sanitizer import (
     sanitize_tool_schemas,
+    strip_oversized_max_length,
     strip_pattern_and_format,
 )
 
@@ -267,6 +268,64 @@ def test_strip_responses_mixed_formats():
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# Nested oversized maxLength recovery is opt-in and leaves flat schemas intact.
+
+
+def test_oversized_nested_max_length_strips_only_nested():
+    tool = _tool("t", {"type": "object", "properties": {
+        "flat": {"type": "string", "maxLength": 50000},
+        "nested": {"type": "object", "properties": {
+            "body": {"type": "string", "maxLength": 4000},
+            "small": {"type": "string", "maxLength": 1999},
+        }},
+    }})
+    out, removed = strip_oversized_max_length([tool])
+    props = out[0]["function"]["parameters"]["properties"]
+    assert removed == 1
+    assert props["flat"]["maxLength"] == 50000
+    assert "maxLength" not in props["nested"]["properties"]["body"]
+    assert props["nested"]["properties"]["small"]["maxLength"] == 1999
+    assert strip_oversized_max_length(out)[1] == 0
+
+
+def test_oversized_nested_max_length_responses_array():
+    tool = {"type": "function", "name": "t", "parameters": {
+        "type": "object", "properties": {
+            "rows": {"type": "array", "items": {"type": "string", "maxLength": 2000}}
+        },
+    }}
+    _, removed = strip_oversized_max_length([tool])
+    assert removed == 1
+    assert "maxLength" not in tool["parameters"]["properties"]["rows"]["items"]
+
+
+def test_oversized_nested_max_length_does_not_strip_examples_or_bool():
+    tool = _tool("t", {"type": "object", "properties": {
+        "nested": {"type": "object", "properties": {
+            "body": {"type": "string", "maxLength": True,
+                     "examples": [{"maxLength": 7000}]},
+        }},
+    }})
+    _, removed = strip_oversized_max_length([tool])
+    assert removed == 0
+    body = tool["function"]["parameters"]["properties"]["nested"]["properties"]["body"]
+    assert body["maxLength"] is True and body["examples"] == [{"maxLength": 7000}]
+
+
+def test_oversized_nested_max_length_combinator_depth():
+    tool = _tool("t", {"type": "object", "properties": {
+        "flat": {"anyOf": [{"type": "string", "maxLength": 4000}]},
+        "nested": {"type": "object", "properties": {
+            "value": {"anyOf": [{"type": "string", "maxLength": 4000}]},
+        }},
+    }})
+    _, removed = strip_oversized_max_length([tool])
+    assert removed == 1
+    props = tool["function"]["parameters"]["properties"]
+    assert props["flat"]["anyOf"][0]["maxLength"] == 4000
+    assert "maxLength" not in props["nested"]["properties"]["value"]["anyOf"][0]
+
+
 # strip_slash_enum — reactive recovery when xAI's /v1/responses (and
 # /v1/chat/completions) grammar-compiler rejects enum values containing
 # a forward slash. Symptom: HTTP 400 "Invalid arguments passed to the

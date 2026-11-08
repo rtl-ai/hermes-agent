@@ -1056,6 +1056,61 @@ class TestClassifyApiError:
         )
         assert other.reason != FailoverReason.llama_cpp_grammar_pattern
 
+    def test_llama_cpp_failed_to_parse_grammar_http_400_only(self):
+        for status in (400, 500):
+            error = MockAPIError("Failed to initialize samplers: failed to parse grammar", status_code=status)
+            result = classify_api_error(error, provider="custom", model="local-llama")
+            if status == 400:
+                assert result.reason == FailoverReason.llama_cpp_grammar_pattern
+                assert result.retryable is True
+                assert result.should_compress is False
+            else:
+                assert result.reason != FailoverReason.llama_cpp_grammar_pattern
+
+    def test_llama_cpp_nested_maxlength_recovery_is_one_shot(self):
+        from agent.turn_recovery import recover_after_classification
+        from agent.turn_retry_state import TurnRetryState
+
+        class Agent:
+            log_prefix = ""
+            api_mode = "chat_completions"
+            provider = "custom"
+            model = "local-llama"
+            base_url = "http://127.0.0.1:8002/v1"
+
+            def __init__(self):
+                self.tools = [{"type": "function", "function": {
+                    "name": "send",
+                    "parameters": {"type": "object", "properties": {
+                        "record": {"type": "object", "properties": {
+                            "body": {"type": "string", "maxLength": 4000},
+                        }},
+                    }},
+                }}]
+
+            def _recover_with_credential_pool(self, **kwargs):
+                return False, False
+
+            def __getattr__(self, name):
+                return lambda *args, **kwargs: None
+
+        error = MockAPIError("Failed to initialize samplers: failed to parse grammar", status_code=400)
+        classified = classify_api_error(error, provider="custom", model="local-llama")
+        agent = Agent()
+        retry = TurnRetryState()
+        again, _ = recover_after_classification(
+            agent, error, classified, retry,
+            status_code=400, error_context=None, messages=[], api_messages=[],
+        )
+        assert again is True
+        body = agent.tools[0]["function"]["parameters"]["properties"]["record"]["properties"]["body"]
+        assert "maxLength" not in body
+        again, _ = recover_after_classification(
+            agent, error, classified, retry,
+            status_code=400, error_context=None, messages=[], api_messages=[],
+        )
+        assert again is False
+
     def test_qwen_apply_prompt_template_no_user_query_not_llama_cpp_grammar(self):
         """Local engines wrap Qwen raise_exception as applyPromptTemplate 400.
 

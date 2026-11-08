@@ -266,6 +266,10 @@ def _resolve_review_runtime(agent: Any, task_cfg: Optional[dict[str, Any]] = Non
         "max_tokens": getattr(agent, "max_tokens", None), "command": getattr(agent, "acp_command", None),
         "args": list(getattr(agent, "acp_args", []) or []), "routed": False,
     }
+    # The app-server's default Hermes bridge cannot perform this fork's
+    # memory/skill write tasks. An explicitly routed auxiliary model may.
+    if parent_api_mode == "codex_app_server":
+        parent["skip_reason"] = "codex_app_server lacks background-review write tools"
     task = _background_review_task_config(task_cfg)
     task_provider, task_model, task_base_url, task_api_key = (
         str(task.get(key, "")).strip() or None for key in ("provider", "model", "base_url", "api_key")
@@ -1277,7 +1281,12 @@ def _run_review_in_thread(
     # A client that can't carry Hermes tool calls back would spawn a fork that cannot write
     # anything. Checked BEFORE the thread-scoped silence so the warning is not swallowed; cheap
     # check first so the normal path never resolves the runtime twice.
-    if not _parent_can_emit_tool_calls(agent) and not _resolve_review_runtime(agent, task_cfg).get("routed"):
+    review_runtime = _resolve_review_runtime(agent, task_cfg)
+    if review_runtime.get("skip_reason"):
+        logger.info("Background review skipped: %s", review_runtime["skip_reason"])
+        _set_thread_approval_callback(None)
+        return
+    if not _parent_can_emit_tool_calls(agent) and not review_runtime.get("routed"):
         logger.warning(
             "Background review skipped: provider %r cannot emit Hermes tool calls, "
             "so the review fork could not write memories or skills. Set "

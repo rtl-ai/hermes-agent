@@ -44,6 +44,14 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
 
+def _format_response_with_model_label(response: str, agent_result: dict[str, Any]) -> str:
+    """Append active model label in markdown format if present."""
+    active_mdl = agent_result.get('model') or ''
+    if response and active_mdl and not response.rstrip().endswith(f'_[Model: {active_mdl}]_'):
+        return f'{response.rstrip()}\n\n_[Model: {active_mdl}]_'
+    return response
+
+
 
 def _acp_launch(runner, source) -> bool:
     """An editor session: ACP shows no reasoning event yet, so its reply keeps the projected block."""
@@ -183,6 +191,7 @@ class GatewayTurnPersistenceMixin:
             if automatic_notices_allowed(source):
                 response = _normalize_empty_agent_response(agent_result, response, history_len=len(history))
             response = _sanitize_gateway_final_response(source.platform, response)
+            response = _format_response_with_model_label(response, agent_result)
 
         # The agent thread already updated the contextvar; propagate to SessionEntry + _save() only
         # if the binding still points at the session this run was launched against.

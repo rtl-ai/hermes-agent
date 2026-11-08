@@ -652,8 +652,13 @@ def _ensure_codex_session(agent, messages: list[dict[str, Any]] | None = None) -
     history_seed = render_history_seed(messages) or None
     # The model always rides along: codex's home is shared, while the Hermes model is per profile/session,
     # so omitting it ran codex's own default instead of the selection.
+    # Optional isolated Codex home prevents unrelated user-level MCP servers
+    # from being attached to the gateway\'s app-server subprocess.
+    codex_home = os.environ.get("HERMES_CODEX_APP_SERVER_HOME", "").strip()
+    codex_home = os.path.abspath(os.path.expanduser(codex_home)) if codex_home else None
     agent._codex_session = CodexAppServerSession(
         cwd=getattr(agent, "session_cwd", None) or str(resolve_agent_cwd()), approval_callback=approval_callback,
+        codex_home=codex_home,
         codex_bin=get_configured_codex_binary(load_config()),
         request_routing=_ServerRequestRouting(auto_approve_exec=auto_approve_requests, auto_approve_apply_patch=auto_approve_requests),
         on_event=make_codex_app_server_event_bridge(agent),

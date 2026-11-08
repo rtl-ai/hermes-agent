@@ -12,6 +12,7 @@ import copy
 from tools.schema_sanitizer import (
     sanitize_tool_schemas,
     strip_pattern_and_format,
+    strip_oversized_max_length,
 )
 
 
@@ -630,3 +631,52 @@ def test_registered_tool_schemas_stay_inside_llama_cpp_repetition_limit():
                 if isinstance(val, int) and val >= 2000:
                     offenders.append((name, key, val))
     assert not offenders, offenders
+
+
+def test_recover_nested_llamacpp_maxlength_oversize():
+    tools = [_tool("report", {
+        "type": "object",
+        "properties": {
+            "payload": {
+                "type": "object",
+                "properties": {"body": {"type": "string", "maxLength": 4000}},
+            },
+        },
+    })]
+    returned, removed = strip_oversized_max_length(tools)
+    assert returned is tools
+    assert removed == 1
+    assert "maxLength" not in tools[0]["function"]["parameters"]["properties"]["payload"]["properties"]["body"]
+
+
+def test_recover_nested_llamacpp_maxlength_preserves_safe_flat_fields():
+    tools = [_tool("report", {
+        "type": "object",
+        "properties": {
+            "flat": {"type": "string", "maxLength": 50000},
+            "payload": {
+                "type": "object",
+                "properties": {"body": {"type": "string", "maxLength": 100}},
+            },
+        },
+    })]
+    _, removed = strip_oversized_max_length(tools)
+    assert removed == 0
+    assert tools[0]["function"]["parameters"]["properties"]["flat"]["maxLength"] == 50000
+    assert tools[0]["function"]["parameters"]["properties"]["payload"]["properties"]["body"]["maxLength"] == 100
+
+
+def test_recover_nested_llamacpp_maxlength_ignores_literal_defaults():
+    tools = [_tool("report", {
+        "type": "object",
+        "properties": {
+            "payload": {
+                "type": "object",
+                "default": {"maxLength": 9000},
+                "properties": {"body": {"type": "string", "maxLength": 5000}},
+            },
+        },
+    })]
+    _, removed = strip_oversized_max_length(tools)
+    assert removed == 1
+    assert tools[0]["function"]["parameters"]["properties"]["payload"]["default"]["maxLength"] == 9000

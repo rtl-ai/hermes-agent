@@ -25,6 +25,15 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 logger = logging.getLogger("gateway.run")
 
 
+def _nonterminal_turn_for_goal(result: Any) -> bool:
+    """A non-final result must not trigger another autonomous goal iteration."""
+    return isinstance(result, dict) and bool(
+        result.get("failed") or result.get("partial")
+        or result.get("interrupted") or result.get("error")
+        or result.get("completed") is False
+    )
+
+
 class GatewayGoalsMixin:
     """Goal/heartbeat continuation, post-turn hooks and loop-wakeup watcher methods for GatewayRunner."""
 
@@ -379,12 +388,7 @@ class GatewayGoalsMixin:
         # A partially completed or interrupted turn can still carry non-empty
         # text. That text must not tell the goal judge that an interrupted
         # operation succeeded, even if the owner capture missed the failure.
-        if isinstance(agent_result, dict):
-            failed = failed or bool(
-                agent_result.get("failed") or agent_result.get("partial")
-                or agent_result.get("interrupted") or agent_result.get("error")
-                or agent_result.get("completed") is False
-            )
+        failed = failed or _nonterminal_turn_for_goal(agent_result)
         hooks = [("loop completion", self._post_turn_loop_completion)]
         if final_text.strip() and not failed:
             hooks.insert(0, ("goal continuation", self._post_turn_goal_continuation))
